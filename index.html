@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Multi-Level Cache + DB Demo (LRU→MRU)</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    .section { margin-bottom: 20px; }
+    .title { font-weight: bold; margin-right: 8px; }
+    .inline-input { width: 120px; margin-right: 8px; }
+    button { margin-right: 8px; }
+    .cache-container {
+      display: flex; 
+      align-items: center; 
+      margin-top: 10px;
+      transition: all 0.3s ease;
+      min-height: 30px; /* helps keep a consistent layout */
+    }
+    .cache-box {
+      min-width: 70px;
+      margin: 2px;
+      padding: 4px 6px;
+      background: #eee;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      text-align: center;
+      transition: all 0.4s ease;
+      font-size: 14px;
+      white-space: pre;
+    }
+    .db-list {
+      margin-top: 10px;
+    }
+    .db-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .db-key {
+      font-weight: bold;
+      margin-right: 6px;
+    }
+    .db-value {
+      margin-right: 10px;
+    }
+    .message {
+      margin-top: 10px; 
+      color: green; 
+      font-weight: bold;
+      min-height: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Multi-Level Cache + Editable DB Demo (LRU on Left, MRU on Right)</h1>
+
+<!-- SECTION A: Modify the Mock DB -->
+<div class="section">
+  <h2>Mock Database (Slow Resource)</h2>
+  <div>
+    <label>DB Key:</label>
+    <input type="text" id="dbKey" class="inline-input" />
+    <label>DB Value:</label>
+    <input type="text" id="dbValue" class="inline-input" />
+    <button id="btnDBAdd">Add/Update in DB</button>
+  </div>
+  <div id="dbContainer" class="db-list"></div>
+</div>
+
+<!-- SECTION B: Interact with the Cache -->
+<div class="section">
+  <h2>Multi-Level Cache (L1=2, L2=3)</h2>
+  <div>
+    <label>Key:</label>
+    <input type="text" id="inputKey" class="inline-input" />
+    <label>Value (for Put):</label>
+    <input type="text" id="inputValue" class="inline-input" />
+  </div>
+  <div>
+    <button id="btnGetOrFetch">Get or Fetch</button>
+    <button id="btnPut">Put (into L1)</button>
+  </div>
+</div>
+
+<!-- SECTION C: Visualization of Caches -->
+<div class="section">
+  <div><span class="title">L1 Cache (cap=2):</span></div>
+  <div id="l1Container" class="cache-container"></div>
+</div>
+
+<div class="section">
+  <div><span class="title">L2 Cache (cap=3):</span></div>
+  <div id="l2Container" class="cache-container"></div>
+</div>
+
+<!-- MESSAGE / OUTPUT AREA -->
+<div class="message" id="messageArea"></div>
+
+<script>
+/**********************************************************************
+ * 1) Mock DB Implementation (fetch_func)
+ **********************************************************************/
+let mockDB = {
+  "user:1": { name: "Alice" },
+  "user:2": { name: "Bob" },
+  "hello":  "world from DB"
+};
+
+function fetchFunc(key) {
+  // returns [found, data]
+  if (key in mockDB) {
+    return [true, mockDB[key]];
+  }
+  return [false, null];
+}
+
+/**********************************************************************
+ * 2) LRUCache Class for L1 & L2
+ **********************************************************************/
+class LRUCache {
+  constructor(capacity, containerEl) {
+    this.capacity = capacity;
+    this.containerEl = containerEl; // DOM element for visualization
+    this.map = new Map();  // key -> value
+    // We'll keep a simple array "order" to track from LRU(0) to MRU(end).
+    // index 0 is the LRU, the last index is the MRU.
+    this.order = [];
+    this._render();
+  }
+
+  get(key) {
+    if (!this.map.has(key)) {
+      return undefined;
+    }
+    const val = this.map.get(key);
+    // Move it to MRU (the end of this.order)
+    this._moveToMRU(key);
+    return val;
+  }
+
+  put(key, value) {
+    // If key exists, remove from order so we can re-insert at the end
+    if (this.map.has(key)) {
+      this._removeKeyFromOrder(key);
+    } else if (this.map.size >= this.capacity) {
+      // Evict from front (LRU)
+      const lruKey = this.order.shift();
+      this.map.delete(lruKey);
+    }
+    // Insert
+    this.map.set(key, value);
+    this.order.push(key); // This is the MRU side
+    this._render();
+  }
+
+  _moveToMRU(key) {
+    this._removeKeyFromOrder(key);
+    this.order.push(key);
+    this._render();
+  }
+
+  _removeKeyFromOrder(key) {
+    const idx = this.order.indexOf(key);
+    if (idx !== -1) {
+      this.order.splice(idx, 1);
+    }
+  }
+
+  _render() {
+    // Clear container
+    this.containerEl.innerHTML = "";
+    // Re-draw from LRU (left) to MRU (right)
+    for (let i = 0; i < this.order.length; i++) {
+      const k = this.order[i];
+      const v = this.map.get(k);
+
+      let box = document.createElement("div");
+      box.className = "cache-box";
+      box.innerText = `${k}\n${JSON.stringify(v)}`;
+      this.containerEl.appendChild(box);
+    }
+  }
+}
+
+/**********************************************************************
+ * 3) MultiLevelCacheFE: ties L1/L2 + fetchFunc
+ **********************************************************************/
+class MultiLevelCacheFE {
+  constructor(capL1, capL2, l1El, l2El) {
+    this.l1 = new LRUCache(capL1, l1El);
+    this.l2 = new LRUCache(capL2, l2El);
+  }
+
+  getOrFetch(key) {
+    // 1) Check L1
+    let val = this.l1.get(key);
+    if (val !== undefined) {
+      return [true, val];
+    }
+
+    // 2) Check L2
+    val = this.l2.get(key);
+    if (val !== undefined) {
+      // promote to L1
+      this.l1.put(key, val);
+      return [true, val];
+    }
+
+    // 3) Not in L1 or L2 => fetch from DB
+    const [found, data] = fetchFunc(key);
+    if (!found) {
+      return [false, null];
+    }
+    // store into L2, then promote to L1
+    this.l2.put(key, data);
+    this.l1.put(key, data);
+    return [true, data];
+  }
+
+  put(key, value) {
+    // Directly place (key, value) into L1
+    this.l1.put(key, value);
+  }
+}
+
+/**********************************************************************
+ * 4) Hook Up UI 
+ **********************************************************************/
+
+// A. Show/Modify the DB
+const dbContainer = document.getElementById("dbContainer");
+function renderDB() {
+  dbContainer.innerHTML = "";
+  // Sort keys for a stable display
+  const keys = Object.keys(mockDB).sort();
+
+  if (keys.length === 0) {
+    dbContainer.innerText = "(DB is empty)";
+    return;
+  }
+
+  keys.forEach((k) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "db-item";
+
+    const keySpan = document.createElement("span");
+    keySpan.className = "db-key";
+    keySpan.innerText = k;
+
+    const valSpan = document.createElement("span");
+    valSpan.className = "db-value";
+    valSpan.innerText = "=> " + JSON.stringify(mockDB[k]);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      delete mockDB[k];
+      renderDB();
+      showMessage(`Removed '${k}' from DB`);
+    });
+
+    wrapper.appendChild(keySpan);
+    wrapper.appendChild(valSpan);
+    wrapper.appendChild(removeBtn);
+    dbContainer.appendChild(wrapper);
+  });
+}
+
+document.getElementById("btnDBAdd").addEventListener("click", () => {
+  const k = document.getElementById("dbKey").value.trim();
+  const v = document.getElementById("dbValue").value.trim();
+  if (!k) return;
+  mockDB[k] = v || null; 
+  renderDB();
+  showMessage(`DB updated: '${k}' => '${mockDB[k]}'`);
+});
+
+// B. MultiLevelCache for L1=2, L2=3
+const l1Container = document.getElementById("l1Container");
+const l2Container = document.getElementById("l2Container");
+const mlc = new MultiLevelCacheFE(2, 3, l1Container, l2Container);
+
+// “Get or Fetch” button
+document.getElementById("btnGetOrFetch").addEventListener("click", () => {
+  const key = document.getElementById("inputKey").value.trim();
+  if (!key) return;
+  
+  const [found, val] = mlc.getOrFetch(key);
+  if (found) {
+    showMessage(`GET success: Found '${key}' => ${JSON.stringify(val)}`);
+  } else {
+    showMessage(`GET miss: '${key}' not found in DB or caches`);
+  }
+});
+
+// “Put” into L1 button
+document.getElementById("btnPut").addEventListener("click", () => {
+  const key = document.getElementById("inputKey").value.trim();
+  if (!key) return;
+  const val = document.getElementById("inputValue").value.trim() || null;
+  mlc.put(key, val);
+  showMessage(`PUT: Inserted '${key}' => '${val}' into L1`);
+});
+
+// Utility to display messages
+const messageArea = document.getElementById("messageArea");
+function showMessage(msg) {
+  messageArea.textContent = msg;
+}
+
+// Initialize
+renderDB();
+showMessage("Welcome! Ready to test the Multi-Level Cache + DB demo (LRU→MRU).");
+</script>
+</body>
+</html>
