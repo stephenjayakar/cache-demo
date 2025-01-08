@@ -1,6 +1,6 @@
 This is an interview problem I generated from ChatGPT. I wrote a rough solution for it, and then had it generate a visualization which ended up being pretty cool!
 
-![screenshot]("screenshot.png")
+![screenshot](screenshot.png)
 
 ---
 
